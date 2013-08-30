@@ -3,7 +3,7 @@
 
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
--export([open/2, pread/3, close/1]).
+-export([open/2, pread/3, file_size/1, close/1]).
 
 -behaviour(gen_server).
 
@@ -38,8 +38,17 @@ handle_call({pread, Offset, Limit}, From, #http_file{streams = Streams} = File) 
     false ->
       File1 = schedule_request(File, {From, Offset, Limit}),
       {noreply, File1}
-  end;    
-  
+  end;
+
+
+handle_call({size}, From, #http_file{size = unknown} = File) ->
+  ?D({size_unknown}),
+  {noreply, File#http_file{size = From}};
+
+handle_call({size}, _From, #http_file{size = Size} = File) ->
+  ?D({return_size, Size}),
+  {reply, Size, File};
+
 handle_call(Unknown, From, File) ->
   io:format("Unknown call: ~p from ~p (~p)~n", [Unknown, From, File]),
   {stop, {error, unknown_call, Unknown}, File}.
@@ -53,12 +62,19 @@ handle_cast(_, State) ->
 
 
 handle_info(start_download, #http_file{url = URL} = State) ->
-  % {ok, {_, Headers, _}} = httpc:request(head, {URL, []}, [], []),
-  % Length = proplists:get_value("content-length", Headers),
-  Length = "0",
   {ok, FirstRequest} = http_file_request:start(self(), URL, 0),
   erlang:monitor(process, FirstRequest),
-  {noreply, State#http_file{streams = [{FirstRequest, 0, 0}], size = list_to_integer(Length)}};
+  {noreply, State#http_file{streams = [{FirstRequest, 0, 0}], size = unknown}};
+
+
+handle_info({file_size,Size,_Req}, #http_file{size = {Pid,Ref}} = State)->
+  ?D({file_size, Size, waiting}),
+  gen_server:reply({Pid,Ref},Size),
+  {noreply, State#http_file{size = Size}};
+
+handle_info({file_size,Size,_Req}, #http_file{} = State) ->
+  ?D({file_size, Size}),
+  {noreply, State#http_file{size = Size}};
 
 handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams = Streams, requests = Requests} = State) ->
   case lists:keyfind(Request, 1, Streams) of
@@ -67,7 +83,7 @@ handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams 
       {noreply, State};
     _ -> 
       ok = file:pwrite(Cache, Offset, Bin),
-      % ?D({"Got bin", Offset, size(Bin), Request, Streams}),
+     % ?D({"Got bin", Offset, size(Bin), Request, Streams}),
       NewStreams1 = update_map(Streams, Request, Offset, size(Bin)),
       {NewStreams2, Removed} = glue_map(NewStreams1),
       % ?D({"Removing streams", NewStreams2, Removed}),
@@ -189,6 +205,10 @@ pread(File, Offset, Limit) ->
   ?D({"Requesting", Offset, Limit}),
   gen_server:call(File, {pread, Offset, Limit}, infinity).
 
+
+file_size(File) ->
+  ?D({"Get file size",File}),
+  gen_server:call(File,{size},infinity).
   
 
 close(File) ->
@@ -196,6 +216,7 @@ close(File) ->
   ok.
   
 
+-ifdef(TEST).
 %%
 %% Tests
 %%
@@ -244,7 +265,7 @@ glue_map4_test() ->
   ?assertEqual({[{a, 0, 31}, {c, 35, 100}], [b]}, glue_map(Map)).
 
 
-
+-endif.
 
 
 

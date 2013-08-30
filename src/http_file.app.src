@@ -1,0 +1,8 @@
+{application, http_file,
+  [
+    {description, "http file"},
+    {vsn, git},
+    {registered, []},
+    {applications, [kernel,stdlib]},
+    {env, []}
+  ]}.

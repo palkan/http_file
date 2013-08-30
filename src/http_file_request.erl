@@ -33,7 +33,7 @@ handle_cast(_Cast, State) ->
 
 handle_info(start, #http_file_request{offset = Offset, url = URL} = File) ->
   Range = lists:flatten(io_lib:format("bytes=~p-", [Offset])),
-  {_, _, Host, Port, Path, Query} = http_uri:parse(URL),
+  {ok,{_, _, Host, Port, Path, Query}} = http_uri:parse(URL),
   Request = "GET "++Path++"?"++Query++" HTTP/1.1\r\nHost: "++Host++"\r\nRange: "++Range++"\r\n\r\n",
   {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {active, once}, {packet, http}]),
   gen_tcp:send(Socket, Request),
@@ -43,10 +43,17 @@ handle_info(start, #http_file_request{offset = Offset, url = URL} = File) ->
 
   
 handle_info({http, Socket, {http_response, _, _Code, _Message}}, File) ->
+  ?D({"Response Code",_Code}),
   inet:setopts(Socket, [{active, once}]),
   {noreply, File};
 
+handle_info({http,Socket,{http_header,_,'Content-Length',_,Length}}, #http_file_request{file=Origin} = File) ->
+  Origin ! {file_size, list_to_integer(Length), self()},
+  inet:setopts(Socket, [{active, once}]),
+  {noreply,File};
+
 handle_info({http, Socket, {http_header, _, _Key, _, _Value}}, File) ->
+  ?D({key,_Key,value,_Value}),
   inet:setopts(Socket, [{active, once}]),
   {noreply, File};
 
