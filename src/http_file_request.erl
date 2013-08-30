@@ -41,6 +41,11 @@ handle_info(start, #http_file_request{offset = Offset, url = URL} = File) ->
   {noreply, File#http_file_request{request_id = Socket}};
 
 
+handle_info({http, _Socket, {http_response, _, Code, _Message}}, #http_file_request{file = Origin} = File) when Code > 400 ->
+  ?D({"HTTP Error: ", Code}),
+  Origin ! {error, Code, self()},
+  {noreply, File};
+
   
 handle_info({http, Socket, {http_response, _, _Code, _Message}}, File) ->
   ?D({"Response Code",_Code}),
