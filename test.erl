@@ -6,34 +6,15 @@ main(["test"]) ->
   http_file:test();
 
 main([URL]) ->
-  main([URL, "temp_file"]);
+  main([URL, "tmp/file"]);
 
 main([URL, Local]) ->
-  File = http_file:open(URL, [{cache_file, Local}]),
-
   Self = self(),
-
-  Limit = http_file:file_size(File),
-
-  io:format("File Size: ~p~n", [Limit]),
-
-  %spawn(fun() ->
-  %  {ok, Result} = http_file:pread(File, 0, Limit),
-  %  io:format("~p~n", [size(Result)]),
-  %  Self ! tick
-  %end),
-
-  %  spawn(fun() ->
-  %    {ok, Result} = http_file:pread(File, 5500000, Limit),
-  %    io:format("~p~n", [size(Result)]),
-  %    Self ! tick
-  %  end),
-
   spawn(fun() ->
     Start = os:timestamp(),
-    {ok, Result} = http_file:pread(File, 0, Limit-1),
+    {ok,Size} = http_file:download(URL, [{cache_file, Local}]),
     Stop = os:timestamp(),
-    io:format("~p~n", [size(Result)]),
+    io:format("File Downloaded Size: ~p~n", [Size]),
     io:format("Start: ~p; Stop: ~p~n", [Start, Stop]),
     Self ! tick
   end),

@@ -3,7 +3,7 @@
 
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
--export([open/2, pread/3, file_size/1, close/1]).
+-export([open/2, download/2, pread/3, file_size/1, close/1]).
 
 -behaviour(gen_server).
 
@@ -21,7 +21,11 @@
 open(URL, Options) ->
   {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
   Pid.
-  
+
+download(URL, Options) ->
+  {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
+  file_size(Pid),
+  gen_server:call(Pid,{download},infinity).
 
 init([URL, Options]) ->
   CacheName = proplists:get_value(cache_file, Options),
@@ -40,6 +44,9 @@ handle_call({pread, Offset, Limit}, From, #http_file{streams = Streams} = File) 
       {noreply, File1}
   end;
 
+handle_call({download},From,#http_file{size = Size} = File) ->
+  File1 = schedule_request(File, {unknown, 0, Size - 1}),
+  {noreply,File1#http_file{request_id = From}};
 
 handle_call({size}, From, #http_file{size = unknown} = File) ->
   ?D({size_unknown}),
@@ -76,7 +83,7 @@ handle_info({file_size,Size,_Req}, #http_file{} = State) ->
   ?D({file_size, Size}),
   {noreply, State#http_file{size = Size}};
 
-handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams = Streams, requests = Requests} = State) ->
+handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams = Streams, requests = Requests, request_id = Rid, size = Size} = State) ->
   case lists:keyfind(Request, 1, Streams) of
     false -> 
       ?D({"Got message from dead process", Request}),
@@ -97,7 +104,7 @@ handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams 
         ?D({"Replying to", From, Offset, Limit}),
         gen_server:reply(From, {ok, Data})
       end, Replies),
-      
+      check_complete(Offset+size(Bin),Size,Rid),
       NewStreams = NewStreams2,
       {noreply, State#http_file{streams = NewStreams, requests = NewRequests}}
   end;
@@ -109,7 +116,11 @@ handle_info({'DOWN', _,process, Stream, _Reason}, #http_file{streams = Streams} 
     _ ->
       {noreply, State}
   end;
-  
+
+handle_info({tcp_closed,_Port}, _State) ->
+  ?D({tcp_closed}),
+  close(self());
+
 
 handle_info(Message, State) ->
   io:format("Some message: ~p~n", [Message]),
@@ -123,7 +134,19 @@ code_change(_Old, State, _Extra) ->
   {ok, State}.
   
 %%%----------------------------
-  
+
+
+check_complete(_, _, Req) when Req == undefined ->
+  ok;
+
+check_complete(Loaded, Total, _) when Total > Loaded ->
+  ok;
+
+check_complete(Loaded, _, Req) ->
+  gen_server:reply(Req,{ok, Loaded}),
+  close(self()).
+
+
   
 schedule_request(#http_file{requests = Requests, streams = Streams, url = URL} = File, {_From, Offset, Limit} = Request) ->
   {ok, Stream} = http_file_request:start(self(), URL, Offset),
@@ -180,6 +203,9 @@ match_requests(Requests, Streams) ->
 
 match_requests([], _Streams, NewRequests, Replies) ->
   {NewRequests, Replies};
+
+match_requests([{unknown, Offset, Size}|Requests], Streams, NewRequests, Replies) ->
+      match_requests(Requests, Streams, [{unknown, Offset, Size}|NewRequests], Replies);
   
 match_requests([{From, Offset, Size}|Requests], Streams, NewRequests, Replies) ->
   case is_data_cached(Streams, Offset, Size) of
