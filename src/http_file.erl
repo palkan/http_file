@@ -19,9 +19,23 @@
 }).
 
 
+%% @doc
+%% Start to download file (don't wait for completion); return {error,Code} if smth goes wrong
+%% @end
+
+-spec open(string(),list()) -> {ok,pid()}
+|{error, Code::non_neg_integer()}. %% http error occurred
+
 open(URL, Options) ->
   {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
   wait_to_start(Pid).
+
+%% @doc
+%% Download file (wait for completion); return {error,Code} if smth goes wrong
+%% @end
+
+-spec download(string(),list()) -> {ok,Size::non_neg_integer()}
+|{error, Code::non_neg_integer()}. %% http error occurred
 
 download(URL, Options) ->
   {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
