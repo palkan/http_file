@@ -94,7 +94,7 @@ handle_cast(_, State) ->
 
 
 handle_info(start_download, #http_file{url = URL} = State) ->
-  {ok, FirstRequest} = http_file_request:start(self(), URL, 0, 0),
+  {ok, FirstRequest} = http_file_request:start(self(), URL, 0),
   erlang:monitor(process, FirstRequest),
   {noreply, State#http_file{streams = [{FirstRequest, 0, 0}]}};
 
