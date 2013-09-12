@@ -1,27 +1,40 @@
 #! /usr/local/bin/escript
-%%! -pa ebin
+%%! -pa ebin -pa ../ibrowse/ebin -pa ../ulitos/ebin
 
 
 main(["test"]) ->
   http_file:test();
 
+
 main([URL]) ->
-  main(["D", URL, "tmp/file"]);
+  main([URL, "file.tmp","4"]);
 
-main(["D", URL, Local]) ->
+main([URL,Local]) ->
+  main([URL,Local,"4"]);
 
-  io:format("Download ~p to ~p", [URL,Local]),
+main([URL, Local, Streams]) ->
+
+  StreamsN = list_to_integer(Streams),
+
+  Options = if StreamsN == 0
+      -> [{cache_file, Local},{chunked,false}];
+     true -> [{cache_file, Local},{streams,StreamsN}]
+  end,
+
+  ibrowse:start(),
+
+  io:format("Download ~p to ~p~n", [URL,Local]),
 
   Self = self(),
   spawn(fun() ->
-    Start = os:timestamp(),
-    io:format("Start ~p", [Start]),
-    case http_file:download(URL, [{cache_file, Local}]) of
+    Start = ulitos:timestamp(),
+    io:format("Start ~p~n", [Start]),
+    case http_file:download(URL, Options) of
       {ok, Size} ->  io:format("File Downloaded Size: ~p~n", [Size]);
       {error, Code} -> io:format("File Downloaded Error: ~p~n", [Code])
     end,
-    Stop = os:timestamp(),
-    io:format("Start: ~p; Stop: ~p~n", [Start, Stop]),
+    Stop = ulitos:timestamp(),
+    io:format("Start: ~p; Stop: ~p; Total: ~p;~n", [Start, Stop, Stop - Start]),
     Self ! tick
   end),
 

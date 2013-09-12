@@ -1,3 +1,9 @@
+%%% @doc
+%%% Module to download or read files over HTTP(S).
+%%%
+%%% Should be able to download files by chunks in parallel (if possible). Not implemented now.
+%%% @end
+
 -module(http_file).
 -define(D(X), io:format("DEBUG ~p:~p ~p~n", [?MODULE, ?LINE, X])).
 
@@ -5,86 +11,119 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 -export([open/2, download/2, pread/3, file_size/1, close/1]).
 
+%% temp
+-export([match_requests/2, update_map/4, glue_map/1]).
+
 -behaviour(gen_server).
 
 -record(http_file, {
   url,
   cache_file,
-  wait_ids = [] ::list({atom(),{pid(),any()}}), %% list of pids/refs waiting for reply
   options,
+  caller,
   streams = [],
-  requests = [],
-  inited = undefined,
-  size = undefined
+  chunk_size,
+  size = 0,
+  loaded_size = 0,
+  ranged = false
 }).
 
 
 %% @doc
-%% Start to download file (don't wait for completion); return {error,Code} if smth goes wrong
+%% Send 'HEAD' request and initiate process or fail if http error occurred.
+%% Doesn't start downloading.
 %% @end
 
--spec open(string(),list()) -> {ok,pid()}
-|{error, Code::non_neg_integer()}. %% http error occurred
+-spec open(string(), list()) -> {ok, pid()}
+|{error, Reason :: any()}. %% http error occurred
 
 open(URL, Options) ->
-  {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
-  wait_to_start(Pid).
+  gen_server:start_link(?MODULE, [URL, Options], []).
 
 %% @doc
-%% Download file (wait for completion); return {error,Code} if smth goes wrong
+%% Download file (synchronously);
+%% return {ok,Size} if download completed;
+%% return {error,Code} if smth goes wrong
+%% @todo implement async download with receiving process
 %% @end
 
--spec download(string(),list()) -> {ok,Size::non_neg_integer()}
-|{error, Code::non_neg_integer()}. %% http error occurred
+-spec download(string(), list()) -> {ok, Size :: non_neg_integer()}
+|{error, Reason :: any()}. %% http error occurred
 
 download(URL, Options) ->
-  {ok, Pid} = gen_server:start_link(?MODULE, [URL, Options], []),
-  case wait_to_start(Pid) of
-    {ok,Pid} -> gen_server:call(Pid, {download}, infinity);
+  ?D(download),
+  case gen_server:start_link(?MODULE, [URL, Options], []) of
+    {ok, Pid} -> gen_server:call(Pid, download, infinity);
     Else -> Else
   end.
 
+
+%% @doc
+%% Partial read file over HTTP.
+%% @todo implement
+%% @end
+
+-spec pread(pid(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | {error, Reason :: any()}.
+
+pread(File, Offset, Limit) ->
+  gen_server:call(File, {pread, Offset, Limit}).
+
+%% @doc
+%% Get file size.
+%% @end
+
+-spec file_size(pid()) -> non_neg_integer().
+
+file_size(File) ->
+  gen_server:call(File, size).
+
+
+close(File) ->
+  gen_server:cast(File, close),
+  ok.
+
+
 init([URL, Options]) ->
   CacheName = proplists:get_value(cache_file, Options),
+  Chunked = proplists:get_value(chunked, Options, true),
   {ok, CacheFile} = file:open(CacheName, [write, read, binary]),
-  self() ! start_download,
-  {ok, #http_file{url = URL, cache_file = CacheFile, options = Options}}.
+  case ibrowse:send_req(URL, [], head, [], []) of
+    {ok, "200", Headers, _} ->
+      Ranged = case proplists:get_value("Accept-Ranges", Headers, undef) of
+                 "bytes" -> true and Chunked;
+                 _ -> false
+               end,
+      Size = list_to_integer(proplists:get_value("Content-Length", Headers, "0")),
+      {ok, #http_file{url = URL, cache_file = CacheFile, options = Options, size = Size, ranged = Ranged}};
+    {_, Code, _, _} -> ?D(Code), {stop, {http_error, Code}}
+  end.
 
+
+handle_call(size, _From, #http_file{size = Size} = File) ->
+  {reply, Size, File};
 
 handle_call({pread, Offset, Limit}, From, #http_file{streams = Streams} = File) ->
   case is_data_cached(Streams, Offset, Limit) of
     true ->
-    %  ?D({"Data ok"}),
       {reply, fetch_cached_data(File, Offset, Limit), File};
     false ->
       File1 = schedule_request(File, {From, Offset, Limit}),
       {noreply, File1}
   end;
 
-handle_call({download}, From, #http_file{size = Size, wait_ids = Waits} = File) ->
-  File1 = schedule_request(File, {unknown, 0, Size - 1}),
-  {noreply, File1#http_file{wait_ids = lists:keystore(download,1,Waits,{download,From})}};
+handle_call(download, From, #http_file{size = Size, ranged = true, options = Options} = File) ->
+  StreamNum = proplists:get_value(streams, Options, 4),
+  ChunkSize = min(Size, 1024 * 1024 * 2),
+  [self() ! start_stream || _S <- lists:seq(1, StreamNum)],
+  {noreply, File#http_file{chunk_size = ChunkSize, caller = From}};
 
-handle_call({size}, _From, #http_file{size = Size} = File) ->
-  ?D({return_size, Size}),
-  {reply, Size, File};
-
-handle_call({wait}, From, #http_file{wait_ids = Waits, inited = undefined} = File) ->
-  ?D(wait),
-  {noreply, File#http_file{wait_ids = lists:keystore(init,1,Waits,{init,From})}};
-
-handle_call({wait}, _From, #http_file{inited = true} = File) ->
-  ?D(wait_true),
-  {reply, {ok,self()},File};
-
-handle_call({wait}, _From, #http_file{inited = {error,Code}} = File) ->
-  ?D(wait_error),
-  {reply, {error,Code},File};
+handle_call(download, From, #http_file{ranged = false} = File) ->
+  self() ! start_stream,
+  {noreply, File#http_file{caller = From}};
 
 handle_call(Unknown, From, File) ->
-  io:format("Unknown call: ~p from ~p (~p)~n", [Unknown, From, File]),
+  ?D({unknown_call, Unknown, From, File}),
   {stop, {error, unknown_call, Unknown}, File}.
-
 
 handle_cast(close, State) ->
   {stop, normal, State};
@@ -93,104 +132,94 @@ handle_cast(_, State) ->
   {noreply, State}.
 
 
-handle_info(start_download, #http_file{url = URL} = State) ->
-  {ok, FirstRequest} = http_file_request:start(self(), URL, 0),
-  erlang:monitor(process, FirstRequest),
-  {noreply, State#http_file{streams = [{FirstRequest, 0, 0}]}};
+handle_info(start_stream, #http_file{size = Size, loaded_size = Loaded} = State) when Loaded == Size ->
+  {noreply, State};
+
+handle_info(start_stream, #http_file{url = Url, chunk_size = ChunkSize, size = Size, streams = Streams, loaded_size = Loaded, ranged = true} = State) ->
+  Amount = if (Size - Loaded > ChunkSize)
+    -> ChunkSize;
+    true -> Size - Loaded
+  end,
+  Bound = Loaded + Amount - 1,
+  ?D({start_stream, Loaded, Bound}),
+  {ibrowse_req_id, ReqId} = ibrowse:send_req(Url, [{"Range", lists:flatten(io_lib:format("bytes=~p-~p", [Loaded, Bound]))}], get, [], [{stream_to, self()}]),
+  NewStreams = lists:keystore(ReqId, 1, Streams, {ReqId, Loaded, Bound}),
+  {noreply, State#http_file{streams = NewStreams, loaded_size = Bound + 1}};
+
+handle_info(start_stream, #http_file{url = Url, ranged = false, size = Size} = State) ->
+  {ibrowse_req_id, ReqId} = ibrowse:send_req(Url, [], get, [], [{stream_to, self()}], 120000),
+  {noreply, State#http_file{streams = [{ReqId,0,Size-1}], loaded_size = Size}};
 
 
-handle_info({file_size, Size, _Req}, #http_file{wait_ids = Waits, size = undefined} = State) ->
-
-  %% getting size is equal to successful initialization
-
-  ?D(Waits),
-
-  {init,Ref} =  lists:keyfind(init,1,Waits),
-  ?D({file_size, Size, waiting}),
-  gen_server:reply(Ref, {ok, self()}),
-  NewWaits = lists:keydelete(init,1,Waits),
-  {noreply, State#http_file{size = Size,wait_ids = NewWaits, inited = true}};
-
-
-
-handle_info({error, Code, Stream}, #http_file{inited = undefined, streams = Streams, wait_ids = Waits, options = Options, cache_file = Cache} = State) ->
-  case lists:keyfind(Stream, 1, Streams) of
-    false ->
-      ?D({"Got message from dead process", Stream}),
-      {noreply, State};
+handle_info({ibrowse_async_headers, ReqId, [$4, _, _] = Code, _Headers}, #http_file{streams = Streams, caller = Caller} = State) ->
+  case lists:keyfind(ReqId, 1, Streams) of
+    {_, _, _} -> gen_server:reply(Caller, {error, Code}),
+      {stop, normal, State};
     _ ->
-      Stream ! stop,
-
-      {init, Ref} = lists:keyfind(init, 1 , Waits),
-
-      gen_server:reply(Ref,{error,Code}),
-
-      %% remove empty cache file
-      file:close(Cache),
-      file:delete(proplists:get_value(cache_file, Options)),
-
-      close(self()),
-      {noreply, State#http_file{streams = [], requests = [], inited = {error, Code}}}
-  end;
-
-handle_info({error, Code, Request}, #http_file{streams = Streams, requests = Requests} = State) ->
-  case lists:keyfind(Request, 1, Streams) of
-    false ->
-      ?D({"Got message from dead process", Request}),
-      {noreply, State};
-    _ ->
-
-      %% send error to all requests
-      lists:foreach(fun({From, _, _}) ->
-       % ?D({"Send error to", From}),
-        gen_server:reply(From, {error, Code})
-      end, Requests),
-
-      close(self()),
-      {noreply, State#http_file{streams = [], requests = []}}
-  end;
-
-handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams = Streams, requests = Requests, wait_ids = Waits, size = Size} = State) ->
-  case lists:keyfind(Request, 1, Streams) of
-    false ->
-      ?D({"Got message from dead process", Request, Streams}),
-      {noreply, State};
-    _ ->
-      ok = file:pwrite(Cache, Offset, Bin),
-      % ?D({"Got bin", Offset, size(Bin), Request, Streams}),
-      NewStreams1 = update_map(Streams, Request, Offset, size(Bin)),
-      {NewStreams2, Removed} = glue_map(NewStreams1),
-      % ?D({"Removing streams", NewStreams2, Removed}),
-      lists:foreach(fun(Stream) ->
-        Stream ! stop
-      end, Removed),
-      {NewRequests, Replies} = match_requests(Requests, NewStreams2),
-      % ?D({"Matching requests", NewRequests, Replies}),
-      lists:foreach(fun({From, Position, Limit}) ->
-        {ok, Data} = file:pread(Cache, Position, Limit),
-     %   ?D({"Replying to", From, Offset, Limit}),
-        gen_server:reply(From, {ok, Data})
-      end, Replies),
-      check_complete(Offset + size(Bin), Size, Waits),
-      NewStreams = NewStreams2,
-      {noreply, State#http_file{streams = NewStreams, requests = NewRequests}}
-  end;
-
-handle_info({'DOWN', _, process, Stream, _Reason}, #http_file{streams = Streams} = State) ->
-  case lists:keytake(Stream, 1, Streams) of
-    {value, Stream, NewStreams} ->
-      {noreply, State#http_file{streams = NewStreams}};
-    _ ->
+      ?D({undefined_stream, ReqId}),
       {noreply, State}
   end;
 
-handle_info({tcp_closed, _Port}, _State) ->
-  ?D({tcp_closed}),
-  close(self());
+handle_info({ibrowse_async_headers, _ReqId, _Code, _Headers}, State) ->
+  ?D(_Code),
+  {noreply, State};
 
+handle_info({ibrowse_async_response, ReqId, Bin}, #http_file{streams = Streams, cache_file = Cache} = State) ->
+  NewStreams = case lists:keyfind(ReqId, 1, Streams) of
+    {_, Offset, Size} -> BSize = length(Bin),
+                          ?D({response, BSize}),
+                          ok = file:pwrite(Cache, Offset, Bin),
+                          lists:keystore(ReqId,1,Streams,{ReqId,Offset+BSize,Size - BSize});
+    _ ->
+      ?D({undefined_stream, ReqId}),
+      Streams
+  end,
+  {noreply, State#http_file{streams = NewStreams}};
+
+
+handle_info({ibrowse_async_response_end, ReqId}, #http_file{size = Size, cache_file = Cache, loaded_size = Loaded, streams = Streams, caller = Caller} = State) when Loaded == Size ->
+  NewStreams = case lists:keyfind(ReqId, 1, Streams) of
+                 {_, _, _} -> lists:keydelete(ReqId, 1, Streams);
+                 _ -> Streams
+               end,
+  if length(NewStreams) == 0
+    -> file:close(Cache),
+       gen_server:reply(Caller, {ok, Size}),
+    {stop, normal, State#http_file{streams = NewStreams}};
+    true -> {noreply, State#http_file{streams = NewStreams}}
+  end;
+
+handle_info({ibrowse_async_response_end, ReqId}, #http_file{streams = Streams} = State) ->
+  NewStreams = case lists:keyfind(ReqId, 1, Streams) of
+                 {_, _, _} -> lists:keydelete(ReqId, 1, Streams);
+                 _ -> Streams
+               end,
+  self() ! start_stream,
+  {noreply, State#http_file{streams = NewStreams}};
+
+
+handle_info({ibrowse_async_response_timeout, ReqId}, #http_file{streams = Streams, url = Url, ranged = false, size = Size} = State) ->
+  NewStreams = case lists:keyfind(ReqId, 1, Streams) of
+                 {_, _, _} -> Streams2 = lists:keydelete(ReqId, 1, Streams),
+                   ?D({increase_timeout, 0, Size}),
+                   {ibrowse_req_id, ReqId2} = ibrowse:send_req(Url, [], get, [], [{stream_to, self()}], 240000),
+                   lists:keystore(ReqId2, 1, Streams2, {ReqId2, 0, Size-1});
+                 _ -> Streams
+               end,
+  {noreply, State#http_file{streams = NewStreams}};
+
+handle_info({ibrowse_async_response_timeout, ReqId}, #http_file{streams = Streams, url = Url} = State) ->
+  NewStreams = case lists:keyfind(ReqId, 1, Streams) of
+                 {_, Offset, Size} -> Streams2 = lists:keydelete(ReqId, 1, Streams),
+                   ?D({increase_timeout, Offset, Size}),
+                   {ibrowse_req_id, ReqId2} = ibrowse:send_req(Url, [{"Range", lists:flatten(io_lib:format("bytes=~p-~p", [Offset, Size]))}], get, [], [{stream_to, self()}], 120000),
+                   lists:keystore(ReqId2, 1, Streams2, {ReqId2, Offset, Size});
+                 _ -> Streams
+               end,
+  {noreply, State#http_file{streams = NewStreams}};
 
 handle_info(Message, State) ->
-  io:format("Some message: ~p~n", [Message]),
+  ?D({unknown_msg, Message}),
   {noreply, State}.
 
 
@@ -203,31 +232,9 @@ code_change(_Old, State, _Extra) ->
 %%%----------------------------
 
 
-wait_to_start(Pid) ->
-  gen_server:call(Pid,{wait},infinity).
 
-
-check_complete(_, _, []) ->
-  ok;
-
-check_complete(Loaded, Total, _) when Total > Loaded ->
-  ok;
-
-
-check_complete(Loaded, _, Waits) ->
-  case lists:keyfind(download,1,Waits) of
-    {download, Ref} -> gen_server:reply(Ref, {ok, Loaded});
-      _ -> ok
-  end,
-  close(self()).
-
-
-
-schedule_request(#http_file{requests = Requests, streams = Streams, url = URL} = File, {_From, Offset, _Limit} = Request) ->
-  {ok, Stream} = http_file_request:start(self(), URL, Offset),
-  erlang:monitor(process, Stream),
- % ?D({"Starting new stream for", URL, Offset, Limit, Stream}),
-  File#http_file{streams = lists:ukeymerge(1, [{Stream, Offset, 0}], Streams), requests = lists:ukeymerge(1, [Request], Requests)}.
+schedule_request(File, {_From, _Offset, _Limit} = _Request) ->
+  File.
 
 
 fetch_cached_data(#http_file{cache_file = Cache}, Offset, Limit) ->
@@ -256,7 +263,7 @@ glue_map([Stream1, Stream2 | Streams], NewStreams, Removed) ->
       glue_map([R1|Streams], NewStreams, [Key|Removed])
   end.
 
-%%   Start1....End1   Start2...End2  
+%%   Start1....End1   Start2...End2
 intersect({_Key1, Offset1, Size1} = R1, {_Key2, Offset2, _Size2} = R2)
   when Offset1 + Size1 < Offset2 ->
   {leave, R1, R2};
@@ -300,21 +307,6 @@ is_data_cached([{_Request, CurrentOffset, CurrentSize} | _], Offset, Size)
 
 is_data_cached([_ | Streams], Offset, Size) ->
   is_data_cached(Streams, Offset, Size).
-
-
-pread(File, Offset, Limit) ->
-  %?D({"Requesting", Offset, Limit}),
-  gen_server:call(File, {pread, Offset, Limit}, infinity).
-
-
-file_size(File) ->
-  ?D({"Get file size", File}),
-  gen_server:call(File, {size}, infinity).
-
-
-close(File) ->
-  gen_server:cast(File, close),
-  ok.
 
 
 -ifdef(TEST).

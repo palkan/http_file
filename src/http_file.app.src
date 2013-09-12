@@ -3,6 +3,6 @@
     {description, "http file"},
     {vsn, git},
     {registered, []},
-    {applications, [kernel,stdlib]},
+    {applications, [kernel,stdlib,ibrowse]},
     {env, []}
   ]}.
