@@ -35,7 +35,7 @@ handle_info(start, #http_file_request{offset = Offset, url = URL} = File) ->
   Range = lists:flatten(io_lib:format("bytes=~p-", [Offset])),
   {ok,{_, _, Host, Port, Path, Query}} = http_uri:parse(URL),
   Request = "GET "++Path++"?"++Query++" HTTP/1.1\r\nHost: "++Host++"\r\nRange: "++Range++"\r\n\r\n",
-  ?D(Request),
+ % ?D(Request),
   {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {active, once}, {packet, http}]),
   gen_tcp:send(Socket, Request),
  % ?D({"Started request", URL, Offset, self()}),
@@ -59,7 +59,7 @@ handle_info({http,Socket,{http_header,_,'Content-Length',_,Length}}, #http_file_
   {noreply,File};
 
 handle_info({http, Socket, {http_header, _, _Key, _, _Value}}, File) ->
-  ?D({key,_Key,value,_Value}),
+ % ?D({key,_Key,value,_Value}),
   inet:setopts(Socket, [{active, once}]),
   {noreply, File};
 

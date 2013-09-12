@@ -153,7 +153,7 @@ handle_info({error, Code, Request}, #http_file{streams = Streams, requests = Req
 handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams = Streams, requests = Requests, wait_ids = Waits, size = Size} = State) ->
   case lists:keyfind(Request, 1, Streams) of
     false ->
-      ?D({"Got message from dead process", Request}),
+      ?D({"Got message from dead process", Request, Streams}),
       {noreply, State};
     _ ->
       ok = file:pwrite(Cache, Offset, Bin),
