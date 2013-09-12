@@ -21,8 +21,8 @@ start(File, URL, Offset) ->
 init([File, URL, Offset]) ->
   self() ! start,
   {ok, #http_file_request{file = File, url = URL, offset = Offset}}.
-  
-  
+
+
 handle_call(_Unknown, _From, #http_file_request{} = File) ->
   {reply, unknown, File}.
 
@@ -35,20 +35,21 @@ handle_info(start, #http_file_request{offset = Offset, url = URL} = File) ->
   Range = lists:flatten(io_lib:format("bytes=~p-", [Offset])),
   {ok,{_, _, Host, Port, Path, Query}} = http_uri:parse(URL),
   Request = "GET "++Path++"?"++Query++" HTTP/1.1\r\nHost: "++Host++"\r\nRange: "++Range++"\r\n\r\n",
+  ?D(Request),
   {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {active, once}, {packet, http}]),
   gen_tcp:send(Socket, Request),
-  ?D({"Started request", URL, Offset, self()}),
+ % ?D({"Started request", URL, Offset, self()}),
   {noreply, File#http_file_request{request_id = Socket}};
 
 
-handle_info({http, _Socket, {http_response, _, Code, _Message}}, #http_file_request{file = Origin} = File) when Code > 400 ->
+handle_info({http, _Socket, {http_response, _, Code, _Message}}, #http_file_request{file = Origin, request_id = _Socket} = File) when Code > 400 ->
   ?D({"HTTP Error: ", Code}),
   Origin ! {error, Code, self()},
   {noreply, File};
 
   
 handle_info({http, Socket, {http_response, _, _Code, _Message}}, File) ->
-  ?D({"Response Code",_Code}),
+ % ?D({"Response Code",_Code}),
   inet:setopts(Socket, [{active, once}]),
   {noreply, File};
 
@@ -72,9 +73,13 @@ handle_info({tcp, Socket, Bin}, #http_file_request{offset = Offset, file = Origi
   Origin ! {bin, Bin, Offset, self()},
   {noreply, File#http_file_request{offset = Offset + size(Bin)}};
 
+handle_info({tcp_closed,_Port},#http_file_request{file = Origin} = File) ->
+  Origin ! {error, tcp_closed, self()},
+  {noreply, File};
+
 
 handle_info(stop, File) ->
-  % ?D({"Stopped", File}),
+  ?D({"Stopped", File}),
   {stop, normal, File};
 
 handle_info(Message, State) ->

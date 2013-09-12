@@ -54,7 +54,7 @@ init([URL, Options]) ->
 handle_call({pread, Offset, Limit}, From, #http_file{streams = Streams} = File) ->
   case is_data_cached(Streams, Offset, Limit) of
     true ->
-      ?D({"Data ok"}),
+    %  ?D({"Data ok"}),
       {reply, fetch_cached_data(File, Offset, Limit), File};
     false ->
       File1 = schedule_request(File, {From, Offset, Limit}),
@@ -94,7 +94,7 @@ handle_cast(_, State) ->
 
 
 handle_info(start_download, #http_file{url = URL} = State) ->
-  {ok, FirstRequest} = http_file_request:start(self(), URL, 0),
+  {ok, FirstRequest} = http_file_request:start(self(), URL, 0, 0),
   erlang:monitor(process, FirstRequest),
   {noreply, State#http_file{streams = [{FirstRequest, 0, 0}]}};
 
@@ -142,7 +142,7 @@ handle_info({error, Code, Request}, #http_file{streams = Streams, requests = Req
 
       %% send error to all requests
       lists:foreach(fun({From, _, _}) ->
-        ?D({"Send error to", From}),
+       % ?D({"Send error to", From}),
         gen_server:reply(From, {error, Code})
       end, Requests),
 
@@ -168,7 +168,7 @@ handle_info({bin, Bin, Offset, Request}, #http_file{cache_file = Cache, streams 
       % ?D({"Matching requests", NewRequests, Replies}),
       lists:foreach(fun({From, Position, Limit}) ->
         {ok, Data} = file:pread(Cache, Position, Limit),
-        ?D({"Replying to", From, Offset, Limit}),
+     %   ?D({"Replying to", From, Offset, Limit}),
         gen_server:reply(From, {ok, Data})
       end, Replies),
       check_complete(Offset + size(Bin), Size, Waits),
@@ -223,10 +223,10 @@ check_complete(Loaded, _, Waits) ->
 
 
 
-schedule_request(#http_file{requests = Requests, streams = Streams, url = URL} = File, {_From, Offset, Limit} = Request) ->
+schedule_request(#http_file{requests = Requests, streams = Streams, url = URL} = File, {_From, Offset, _Limit} = Request) ->
   {ok, Stream} = http_file_request:start(self(), URL, Offset),
   erlang:monitor(process, Stream),
-  ?D({"Starting new stream for", URL, Offset, Limit, Stream}),
+ % ?D({"Starting new stream for", URL, Offset, Limit, Stream}),
   File#http_file{streams = lists:ukeymerge(1, [{Stream, Offset, 0}], Streams), requests = lists:ukeymerge(1, [Request], Requests)}.
 
 
@@ -303,7 +303,7 @@ is_data_cached([_ | Streams], Offset, Size) ->
 
 
 pread(File, Offset, Limit) ->
-  ?D({"Requesting", Offset, Limit}),
+  %?D({"Requesting", Offset, Limit}),
   gen_server:call(File, {pread, Offset, Limit}, infinity).
 
 
