@@ -5,8 +5,8 @@
 %%% @end
 
 -module(http_file).
--define(D(X), io:format("DEBUG ~p:~p ~p~n", [?MODULE, ?LINE, X])).
-
+%-define(D(X), io:format("DEBUG ~p:~p ~p~n", [?MODULE, ?LINE, X])).
+-define(D(X),0).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 -export([open/2, download/2, pread/3, file_size/1, close/1]).
