@@ -86,7 +86,6 @@ close(File) ->
 init([URL, Options]) ->
   CacheName = proplists:get_value(cache_file, Options),
   Chunked = proplists:get_value(chunked, Options, true),
-  {ok, CacheFile} = file:open(CacheName, [write, read, binary]),
   case ibrowse:send_req(URL, [], head, [], []) of
     {ok, "200", Headers, _} ->
       Ranged = case proplists:get_value("Accept-Ranges", Headers, undef) of
@@ -94,6 +93,7 @@ init([URL, Options]) ->
                  _ -> false
                end,
       Size = list_to_integer(proplists:get_value("Content-Length", Headers, "0")),
+      {ok, CacheFile} = http_file_writer:start(CacheName, Size),
       {ok, #http_file{url = URL, cache_file = CacheFile, options = Options, size = Size, ranged = Ranged}};
     {_, Code, _, _} -> ?D(Code), {stop, {http_error, Code}}
   end.
@@ -113,7 +113,7 @@ handle_call({pread, Offset, Limit}, From, #http_file{streams = Streams} = File) 
 
 handle_call(download, From, #http_file{size = Size, ranged = true, options = Options} = File) ->
   StreamNum = proplists:get_value(streams, Options, 4),
-  ChunkSize = min(Size, 1024 * 1024 * 2),
+  ChunkSize = min(Size, 1024 * 1024),
   [self() ! start_stream || _S <- lists:seq(1, StreamNum)],
   {noreply, File#http_file{chunk_size = ChunkSize, caller = From}};
 
@@ -167,8 +167,8 @@ handle_info({ibrowse_async_headers, _ReqId, _Code, _Headers}, State) ->
 handle_info({ibrowse_async_response, ReqId, Bin}, #http_file{streams = Streams, cache_file = Cache} = State) ->
   NewStreams = case lists:keyfind(ReqId, 1, Streams) of
     {_, Offset, Size} -> BSize = length(Bin),
-                          ?D({response, BSize}),
-                          ok = file:pwrite(Cache, Offset, Bin),
+                          ?D({response, BSize, Size}),
+                          Cache ! {data,Offset,Bin},
                           lists:keystore(ReqId,1,Streams,{ReqId,Offset+BSize,Size - BSize});
     _ ->
       ?D({undefined_stream, ReqId}),
@@ -177,17 +177,12 @@ handle_info({ibrowse_async_response, ReqId, Bin}, #http_file{streams = Streams, 
   {noreply, State#http_file{streams = NewStreams}};
 
 
-handle_info({ibrowse_async_response_end, ReqId}, #http_file{size = Size, cache_file = Cache, loaded_size = Loaded, streams = Streams, caller = Caller} = State) when Loaded == Size ->
+handle_info({ibrowse_async_response_end, ReqId}, #http_file{size = Size, loaded_size = Loaded, streams = Streams} = State) when Loaded == Size ->
   NewStreams = case lists:keyfind(ReqId, 1, Streams) of
                  {_, _, _} -> lists:keydelete(ReqId, 1, Streams);
                  _ -> Streams
                end,
-  if length(NewStreams) == 0
-    -> file:close(Cache),
-       gen_server:reply(Caller, {ok, Size}),
-    {stop, normal, State#http_file{streams = NewStreams}};
-    true -> {noreply, State#http_file{streams = NewStreams}}
-  end;
+  {noreply, State#http_file{streams = NewStreams}};
 
 handle_info({ibrowse_async_response_end, ReqId}, #http_file{streams = Streams} = State) ->
   NewStreams = case lists:keyfind(ReqId, 1, Streams) of
@@ -217,6 +212,10 @@ handle_info({ibrowse_async_response_timeout, ReqId}, #http_file{streams = Stream
                  _ -> Streams
                end,
   {noreply, State#http_file{streams = NewStreams}};
+
+handle_info({http_file_write_complete,Cache},#http_file{caller = Caller, cache_file = Cache,loaded_size = Size}=State) ->
+  gen_server:reply(Caller,{ok,Size}),
+  {stop, normal, State};
 
 handle_info(Message, State) ->
   ?D({unknown_msg, Message}),
