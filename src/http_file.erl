@@ -5,8 +5,7 @@
 %%% @end
 
 -module(http_file).
-%-define(D(X), io:format("DEBUG ~p:~p ~p~n", [?MODULE, ?LINE, X])).
--define(D(X),0).
+-define(D(X), io:format("DEBUG ~p:~p ~p~n", [?MODULE, ?LINE, X])).
 
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 -export([open/2, download/2, pread/3, file_size/1, close/1]).
@@ -84,17 +83,22 @@ close(File) ->
 
 
 init([URL, Options]) ->
-  CacheName = proplists:get_value(cache_file, Options),
-  Chunked = proplists:get_value(chunked, Options, true),
   case ibrowse:send_req(URL, [], head, [], []) of
     {ok, "200", Headers, _} ->
+      Size = list_to_integer(proplists:get_value("Content-Length", Headers, "0")),
+      CacheName = proplists:get_value(cache_file, Options),
+      Options2 = case proplists:get_value(strategy,Options,null) of
+                   null -> Options;
+                   Fun -> {Chunked_,Streams_} = Fun(Size),
+                     proplists:expand(Options,[{chunked,Chunked_},{streams,Streams_}])
+                 end,
+      Chunked = proplists:get_value(chunked, Options2, true),
       Ranged = case proplists:get_value("Accept-Ranges", Headers, undef) of
                  "bytes" -> true and Chunked;
                  _ -> false
                end,
-      Size = list_to_integer(proplists:get_value("Content-Length", Headers, "0")),
       {ok, CacheFile} = http_file_writer:start(CacheName, Size),
-      {ok, #http_file{url = URL, cache_file = CacheFile, options = Options, size = Size, ranged = Ranged}};
+      {ok, #http_file{url = URL, cache_file = CacheFile, options = Options2, size = Size, ranged = Ranged}};
     {_, Code, _, _} -> ?D(Code), {stop, {http_error, Code}}
   end.
 
